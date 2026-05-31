@@ -1,0 +1,12 @@
+numpy
+pandas
+scipy
+matplotlib
+seaborn
+arviz
+pymc-marketing
+nutpie
+jupyter
+ipykernel
+jupytext
+pre-commit

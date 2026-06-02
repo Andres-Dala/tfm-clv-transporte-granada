@@ -17,8 +17,10 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data" / "synthetic"
 NOTEBOOKS_DIR = ROOT / "notebooks"
 DOCS_DIR = ROOT / "docs"
+MODELS_DIR = ROOT / "models"   # modelos bayesianos ya ajustados (.nc)
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 RFM_PATH = DATA_DIR / "rfm_full.csv"
 
@@ -230,13 +232,79 @@ def priors_to_scipy(priors: dict) -> dict:
     return {k: prior_to_scipy(v) for k, v in priors.items()}
 
 
+def _translate_a_b_to_phi_kappa(prior_a: dict, prior_b: dict,
+                                 n_samples: int = 20_000,
+                                 seed: int = 42) -> dict:
+    """
+    Traduce priors sobre los parámetros (a, b) de la Beta del abandono en
+    priors sobre la reparametrización (phi_dropout, kappa_dropout) que usa
+    internamente pymc-marketing:
+
+        phi_dropout   = a / (a + b)       # media del Beta, en (0, 1)
+        kappa_dropout = a + b             # concentración del Beta, en (0, ∞)
+
+    Procedimiento: forward sampling — se sortean (a, b) de sus priors,
+    se calculan las marginales (phi, kappa) y se ajusta una Beta a phi y
+    una Gamma a kappa por máxima verosimilitud.
+
+    Pareja exacta vía MLE: las distribuciones objetivo (Beta para phi,
+    Gamma para kappa) son la elección canónica por compatibilidad de
+    soporte y conjugación parcial con los parámetros originales.
+    """
+    import numpy as np
+    from scipy import stats
+
+    rng = np.random.default_rng(seed)
+    a_samples = prior_to_scipy(prior_a).rvs(size=n_samples, random_state=rng)
+    b_samples = prior_to_scipy(prior_b).rvs(size=n_samples, random_state=rng)
+
+    # Salvaguardas numéricas
+    a_samples = np.maximum(a_samples, 1e-6)
+    b_samples = np.maximum(b_samples, 1e-6)
+
+    phi_samples   = a_samples / (a_samples + b_samples)
+    kappa_samples = a_samples + b_samples
+
+    # Ajuste Beta a phi (soporte (0, 1))
+    phi_alpha, phi_beta, _, _ = stats.beta.fit(phi_samples, floc=0, fscale=1)
+    # Ajuste Gamma a kappa (soporte (0, ∞))
+    kappa_alpha, _, kappa_scale = stats.gamma.fit(kappa_samples, floc=0)
+    kappa_beta = 1.0 / kappa_scale
+
+    return {
+        "phi_dropout_prior":   {"dist": "Beta",
+                                "kwargs": {"alpha": float(phi_alpha),
+                                           "beta":  float(phi_beta)}},
+        "kappa_dropout_prior": {"dist": "Gamma",
+                                "kwargs": {"alpha": float(kappa_alpha),
+                                           "beta":  float(kappa_beta)}},
+    }
+
+
 def priors_to_model_config(priors: dict) -> dict:
     """
     Empaqueta un juego de priors en el formato model_config que espera
-    pymc_marketing.clv.BetaGeoModel:
-        {"r_prior": {...}, "alpha_prior": {...}, ...}
+    pymc_marketing.clv.BetaGeoModel.
+
+    pymc-marketing reparametriza el Beta del abandono como
+    (phi_dropout, kappa_dropout) = (a/(a+b), a+b). Por tanto los priors
+    sobre (a, b) se traducen por forward sampling antes de pasarlos al
+    modelo. Los priors sobre (r, alpha) pasan sin transformación.
+
+    Acepta priors con cualquier subconjunto de claves ("r", "alpha", "a", "b")
+    y devuelve un dict con las claves correspondientes que entiende
+    BetaGeoModel ("r_prior", "alpha_prior", "phi_dropout_prior",
+    "kappa_dropout_prior"). Las claves ausentes usan los priors por defecto
+    de pymc-marketing.
     """
-    return {f"{k}_prior": v for k, v in priors.items()}
+    config = {}
+    if "r" in priors:
+        config["r_prior"] = priors["r"]
+    if "alpha" in priors:
+        config["alpha_prior"] = priors["alpha"]
+    if "a" in priors and "b" in priors:
+        config.update(_translate_a_b_to_phi_kappa(priors["a"], priors["b"]))
+    return config
 
 
 # ══════════════════════════════════════════════════════════════════

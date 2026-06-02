@@ -45,7 +45,7 @@ from pymc_marketing import clv
 
 from config import (
     SEED, STATS, PARAMS_CALIBRATED, PRIORS, PRIORS_DEFAULT_KEY,
-    MCMC_CONFIG, RFM_PATH, priors_to_model_config,
+    MCMC_CONFIG, RFM_PATH, MODELS_DIR, priors_to_model_config,
 )
 
 az.style.use("arviz-darkgrid")
@@ -59,9 +59,16 @@ RNG = np.random.default_rng(SEED)
 # a CLV en euros. Valor de referencia: 0.66 €/viaje en el sistema CTAGR.
 PRECIO_VIAJE = 0.66
 
+# Cache de modelos ajustados:
+#   - False (default): si existe el .nc cacheado, lo carga; si no, ajusta y guarda.
+#   - True: ignora el cache y reajusta. Pon True cuando cambies datos o priors.
+FORCE_REFIT = False
+
 print(f"arviz {az.__version__}")
 print(f"Prior por defecto:    {PRIORS_DEFAULT_KEY}")
 print(f"Configuración MCMC:   {MCMC_CONFIG}")
+print(f"Modelos cacheados en: {MODELS_DIR}")
+print(f"FORCE_REFIT:          {FORCE_REFIT}")
 
 # %% [markdown]
 # ## 1. Carga del dataset y particiones
@@ -102,23 +109,40 @@ print(f"  Correlación de Pearson: {corr:+.3f}  (umbral aceptable: |ρ| < {umbra
 # $$
 #
 # La verosimilitud individual para un usuario con historial $(x, t_x, T)$ es la suma compacta de Fader-Hardie-Lee (2005). `pymc-marketing` la implementa internamente.
-#
-# Los priors se eligen desde `config.PRIORS[PRIORS_DEFAULT_KEY]` — para que cambiar el juego de priors sea un único edit en `config.py`.
 
 # %%
-bgnbd = clv.BetaGeoModel(
-    data=data_full,
-    model_config=priors_to_model_config(PRIORS[PRIORS_DEFAULT_KEY])
-)
-bgnbd.build_model()
-print("Modelo BG/NBD construido")
+CACHE_BGNBD = MODELS_DIR / f"bgnbd_{PRIORS_DEFAULT_KEY}_n{len(data_full)}.nc"
+
+if CACHE_BGNBD.exists() and not FORCE_REFIT:
+    print(f"Cargando modelo BG/NBD cacheado: {CACHE_BGNBD.name}")
+    bgnbd = clv.BetaGeoModel.load(CACHE_BGNBD)
+    bgnbd_cached = True
+else:
+    bgnbd = clv.BetaGeoModel(
+        data=data_full,
+        model_config=priors_to_model_config(PRIORS[PRIORS_DEFAULT_KEY])
+    )
+    bgnbd.build_model()
+    bgnbd_cached = False
+    if FORCE_REFIT:
+        print("FORCE_REFIT activado : modelo nuevo, se ajustará en la siguiente celda")
+    else:
+        print(f"No hay cache para {CACHE_BGNBD.name} : modelo nuevo, se ajustará")
+
+print("\nEstructura del modelo:")
 print(bgnbd)
 
 # %%
-print(f"Ajustando BG/NBD sobre {len(data_full):,} usuarios con NUTS (nutpie)...")
-t0 = time.time()
-bgnbd.fit(**MCMC_CONFIG)
-print(f"Fit completo en {(time.time()-t0)/60:.1f} minutos")
+if bgnbd_cached:
+    print(f"Modelo ya ajustado (cargado de {CACHE_BGNBD.name}) — saltando .fit()")
+else:
+    print(f"Ajustando BG/NBD sobre {len(data_full):,} usuarios con NUTS (nutpie)...")
+    t0 = time.time()
+    bgnbd.fit(**MCMC_CONFIG)
+    dt = (time.time() - t0) / 60
+    print(f"Fit completo en {dt:.1f} minutos. Guardando cache...")
+    bgnbd.save(CACHE_BGNBD)
+    print(f"Modelo guardado en {CACHE_BGNBD}")
 
 # %%
 VARS_BG = ["r", "alpha", "a", "b"]
@@ -142,71 +166,228 @@ az.plot_trace(
 )
 plt.show()
 
+# %% [markdown]
+# ## 2.5 Análisis predictivo del BG/NBD
+#
+# Una vez ajustado y diagnosticado el modelo, lo usamos para responder las preguntas operativas del TFM. Siguiendo la referencia de `pymc-marketing`, mostramos cuatro análisis:
+#
+# 1. **MAP vs MCMC** — comparación del optimizador puntual (L-BFGS-B sobre el log-posterior) con la posterior completa, como sanity check de que el MAP cae dentro de la masa central del posterior MCMC.
+# 2. **Expected purchases** sobre un horizonte futuro de 90 semanas para usuarios concretos, con bandas de incertidumbre.
+# 3. **$P(\text{vivo})$** sobre el mismo horizonte — el decaimiento de la probabilidad posterior de seguir activo a medida que pasa el tiempo sin nuevas validaciones.
+# 4. **Probabilidad de cero transacciones** en los próximos $t$ períodos.
+#
+# Los tres últimos se calculan sobre una **muestra estratificada de 10 usuarios** que representa el rango completo de comportamientos del dataset.
+
 # %%
-# Parameter recovery: comparar posterior con los valores que sembraron los datos sintéticos
-fig, axes = plt.subplots(2, 2, figsize=(11, 6.5))
+# Ajuste MAP del mismo modelo (cacheado igual que el MCMC)
+CACHE_BGNBD_MAP = MODELS_DIR / f"bgnbd_map_{PRIORS_DEFAULT_KEY}_n{len(data_full)}.nc"
+
+if CACHE_BGNBD_MAP.exists() and not FORCE_REFIT:
+    print(f"Cargando MAP cacheado: {CACHE_BGNBD_MAP.name}")
+    bgnbd_map = clv.BetaGeoModel.load(CACHE_BGNBD_MAP)
+else:
+    bgnbd_map = clv.BetaGeoModel(
+        data=data_full,
+        model_config=priors_to_model_config(PRIORS[PRIORS_DEFAULT_KEY])
+    )
+    print("Ajustando BG/NBD por MAP (L-BFGS-B)...")
+    t0 = time.time()
+    bgnbd_map.fit(method="map")
+    print(f"MAP completo en {time.time()-t0:.1f} s. Guardando cache...")
+    bgnbd_map.save(CACHE_BGNBD_MAP)
+    print(f"✓ Modelo MAP guardado en {CACHE_BGNBD_MAP.name}")
+
+# Resumen MAP
+print("\nEstimaciones puntuales MAP:")
+for var in VARS_BG:
+    val = float(bgnbd_map.idata.posterior[var].mean())
+    print(f"  {var}: {val:.4f}")
+
+# %%
+# Comparación MAP vs MCMC: superponer la estimación puntual sobre la posterior
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 for ax, var in zip(axes.ravel(), VARS_BG):
-    az.plot_posterior(bgnbd.idata, var_names=[var], hdi_prob=0.95,
-                       point_estimate="mean", ax=ax, label="MCMC")
-    ax.axvline(PARAMS_CALIBRATED[var], color="red", ls="--", lw=1.5,
-               label=f"verdadero = {PARAMS_CALIBRATED[var]:.3f}")
+    az.plot_posterior(
+        bgnbd.idata.posterior[var].values.flatten(),
+        color="C0", point_estimate="mean", hdi_prob=0.95, ax=ax,
+    )
+    map_val  = float(bgnbd_map.idata.posterior[var].mean())
+    true_val = PARAMS_CALIBRATED[var]
+    ax.axvline(map_val,  color="C2", ls="-.", lw=2,
+               label=f"MAP = {map_val:.3f}")
+    ax.set_title(f"${var}$ — MCMC posterior + MAP point estimate")
     ax.legend(fontsize=8)
-    ax.set_title(f"posterior de ${var}$")
 plt.tight_layout()
 plt.show()
 
 # %%
-# PPC manual usando la fórmula analítica del BG/NBD.
-#
-# Evitamos `clv.plot_expected_purchases_ppc` porque internamente llama a
-# `pm.sample_posterior_predictive`, que pasa por PyTensor. Como el entorno
-# Windows no tiene g++, PyTensor cae a modo Python puro y la simulación
-# tarda decenas de horas.
-#
-# `bgnbd.expected_purchases(data, future_t=0)` usa la fórmula cerrada de
-# Fader-Hardie-Lee (ec. 9, 2005). Vectorizada y rápida.
-ep_observed = bgnbd.expected_purchases(data=data_full, future_t=0)
+# Muestra estratificada de 10 usuarios para los plots por usuario.
+# Cubrimos el rango de comportamientos del dataset: frecuencia baja/media/alta
+# combinada con dormancia baja/alta. Suficiente para que los gráficos cuenten
+# la historia sin saturar.
 
-ep_med = ep_observed.median(dim=("chain", "draw")).to_pandas()
-ep_lo  = ep_observed.quantile(0.025, dim=("chain", "draw")).to_pandas()
-ep_hi  = ep_observed.quantile(0.975, dim=("chain", "draw")).to_pandas()
+q_freq = data_full["frequency"].quantile([0.25, 0.5, 0.75]).values
+data_full = data_full.copy()
+data_full["dormancia"] = data_full["T"] - data_full["recency"]
+data_full["estrato_freq"] = pd.cut(
+    data_full["frequency"],
+    bins=[-1, q_freq[0], q_freq[1], q_freq[2], np.inf],
+    labels=["frec_baja", "frec_media", "frec_alta", "frec_muy_alta"],
+)
 
-fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+sample_customers = (
+    data_full.groupby("estrato_freq", observed=True, group_keys=False)
+            .apply(lambda d: d.sample(min(3, len(d)), random_state=SEED))
+            .head(10)
+            .reset_index(drop=True)
+)
+# Limpiamos para no contaminar otras celdas
+data_full = data_full.drop(columns=["estrato_freq", "dormancia"])
 
-# (a) Histogramas marginales — observado vs predicho
-ax = axes[0]
-upper = data_full["frequency"].quantile(0.99)
-ax.hist(data_full["frequency"].clip(0, upper), bins=50, density=True,
-        alpha=0.6, color="gray", label="observado")
-ax.hist(ep_med.clip(0, upper), bins=50, density=True,
-        alpha=0.6, color="C0", label="posterior (mediana por usuario)")
-ax.set_xlabel("número de transacciones $x$")
-ax.set_title("PPC marginal — frecuencia")
-ax.legend()
+print(f"Muestra de {len(sample_customers)} usuarios:")
+print(sample_customers[["customer_id", "frequency", "recency", "T"]].to_string(index=False))
 
-# (b) Observado vs predicho usuario a usuario, con HDI 95 %
-ax = axes[1]
-ax.errorbar(data_full["frequency"], ep_med,
-            yerr=[ep_med - ep_lo, ep_hi - ep_med],
-            fmt="o", ms=2, alpha=0.15, color="C0",
-            ecolor="lightgray", elinewidth=0.5)
-mx = max(data_full["frequency"].max(), ep_hi.max())
-ax.plot([0, mx], [0, mx], "k--", lw=1, label="y = x  (predicción perfecta)")
-ax.set_xlabel("frecuencia observada $x$")
-ax.set_ylabel("$E[X \\mid \\text{historial}]$ posterior")
-ax.set_title("PPC individual — observado vs predicho (HDI 95 %)")
-ax.legend()
+# %%
+# Trayectoria de E[X(t)] para t = 1..90 semanas en la muestra de 10 usuarios.
+# Calculamos posterior completo (chain, draw) en cada paso temporal y luego
+# resumimos en mean + bandas HDI 94% y 50%.
 
+steps = 90
+print(f"Calculando E[X(t)] para t = 1..{steps} semanas sobre {len(sample_customers)} usuarios...")
+t0 = time.time()
+exp_purchases_steps = xr.concat(
+    [bgnbd.expected_purchases(data=sample_customers, future_t=t)
+     for t in range(1, steps + 1)],
+    dim="future_t",
+).assign_coords(future_t=np.arange(1, steps + 1))
+print(f"Hecho en {time.time()-t0:.1f} s")
+
+# Plot 2x5
+fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharex=True)
+for ax, (_, cust) in zip(axes.ravel(), sample_customers.iterrows()):
+    curve = exp_purchases_steps.sel(customer_id=cust["customer_id"])
+
+    mean = curve.mean(dim=("chain", "draw"))
+    lo94 = curve.quantile(0.03, dim=("chain", "draw"))
+    hi94 = curve.quantile(0.97, dim=("chain", "draw"))
+    lo50 = curve.quantile(0.25, dim=("chain", "draw"))
+    hi50 = curve.quantile(0.75, dim=("chain", "draw"))
+
+    t_grid = np.arange(1, steps + 1)
+    ax.fill_between(t_grid, lo94, hi94, alpha=0.20, color="C0", label="HDI 94%")
+    ax.fill_between(t_grid, lo50, hi50, alpha=0.35, color="C0", label="HDI 50%")
+    ax.plot(t_grid, mean, color="C0", lw=1.5, label="posterior mean")
+
+    ax.set_title(
+        f"{cust['customer_id']}\nx={cust['frequency']}, "
+        f"t_x={cust['recency']:.0f}, T={cust['T']:.0f}",
+        fontsize=9,
+    )
+    ax.set_xlabel("semanas futuras")
+axes[0, 0].set_ylabel("E[X(t)]")
+axes[1, 0].set_ylabel("E[X(t)]")
+axes[0, 0].legend(fontsize=7, loc="upper left")
+
+plt.suptitle("Transacciones futuras esperadas — predicción posterior por usuario", fontsize=11)
 plt.tight_layout()
 plt.show()
 
-# Resumen cuantitativo
-residuos = data_full["frequency"].values - ep_med.values
-print(f"Residuos (observado - posterior mediana):")
-print(f"  media:       {residuos.mean():+.2f}")
-print(f"  desviación:  {residuos.std():.2f}")
-print(f"  % usuarios dentro del HDI 95%: "
-      f"{((data_full['frequency'].values >= ep_lo.values) & (data_full['frequency'].values <= ep_hi.values)).mean():.1%}")
+# %%
+# P(vivo) en función del tiempo: para cada paso t avanzamos el T del usuario
+# bajo el supuesto de que NO ocurren nuevas validaciones — eso modela la
+# erosión natural de la confianza en que sigue activo.
+
+steps = 90
+print(f"Calculando P(vivo) en horizonte futuro de {steps} semanas...")
+t0 = time.time()
+
+p_alive_steps_list = []
+for t in range(0, steps + 1):
+    future_data = sample_customers.copy()
+    future_data["T"] = future_data["T"] + t
+    p_alive_steps_list.append(bgnbd.expected_probability_alive(data=future_data))
+
+p_alive_steps = xr.concat(p_alive_steps_list, dim="future_t").assign_coords(
+    future_t=np.arange(0, steps + 1)
+)
+print(f"Hecho en {time.time()-t0:.1f} s")
+
+fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharex=True, sharey=True)
+for ax, (_, cust) in zip(axes.ravel(), sample_customers.iterrows()):
+    curve = p_alive_steps.sel(customer_id=cust["customer_id"])
+
+    mean = curve.mean(dim=("chain", "draw"))
+    lo94 = curve.quantile(0.03, dim=("chain", "draw"))
+    hi94 = curve.quantile(0.97, dim=("chain", "draw"))
+    lo50 = curve.quantile(0.25, dim=("chain", "draw"))
+    hi50 = curve.quantile(0.75, dim=("chain", "draw"))
+
+    t_grid = np.arange(0, steps + 1)
+    ax.fill_between(t_grid, lo94, hi94, alpha=0.20, color="C1", label="HDI 94%")
+    ax.fill_between(t_grid, lo50, hi50, alpha=0.35, color="C1", label="HDI 50%")
+    ax.plot(t_grid, mean, color="C1", lw=1.5, label="posterior mean")
+
+    ax.set_ylim(0, 1.05)
+    ax.set_title(
+        f"{cust['customer_id']}\nx={cust['frequency']}, "
+        f"t_x={cust['recency']:.0f}, T={cust['T']:.0f}",
+        fontsize=9,
+    )
+    ax.set_xlabel("semanas futuras")
+axes[0, 0].set_ylabel("P(vivo)")
+axes[1, 0].set_ylabel("P(vivo)")
+axes[0, 0].legend(fontsize=7, loc="lower left")
+
+plt.suptitle("Decaimiento de $P(\\text{vivo})$ por usuario en horizonte futuro", fontsize=11)
+plt.tight_layout()
+plt.show()
+
+# %%
+# Probabilidad de NO realizar ninguna transacción en los próximos t períodos.
+# Es la dual de E[X(t)]: complementa la lectura mostrando explícitamente la
+# probabilidad de inactividad en una ventana corta (30 semanas como en la
+# referencia de pymc-marketing).
+
+steps = 30
+print(f"Calculando P(X=0 en próximas t semanas) para t = 1..{steps}...")
+t0 = time.time()
+p_no_purchase = xr.concat(
+    [bgnbd.expected_probability_no_purchase(data=sample_customers, t=t)
+     for t in range(1, steps + 1)],
+    dim="future_t",
+).assign_coords(future_t=np.arange(1, steps + 1))
+print(f"Hecho en {time.time()-t0:.1f} s")
+
+fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharex=True, sharey=True)
+for ax, (_, cust) in zip(axes.ravel(), sample_customers.iterrows()):
+    curve = p_no_purchase.sel(customer_id=cust["customer_id"])
+
+    mean = curve.mean(dim=("chain", "draw"))
+    lo94 = curve.quantile(0.03, dim=("chain", "draw"))
+    hi94 = curve.quantile(0.97, dim=("chain", "draw"))
+    lo50 = curve.quantile(0.25, dim=("chain", "draw"))
+    hi50 = curve.quantile(0.75, dim=("chain", "draw"))
+
+    t_grid = np.arange(1, steps + 1)
+    ax.fill_between(t_grid, lo94, hi94, alpha=0.20, color="C3", label="HDI 94%")
+    ax.fill_between(t_grid, lo50, hi50, alpha=0.35, color="C3", label="HDI 50%")
+    ax.plot(t_grid, mean, color="C3", lw=1.5, label="posterior mean")
+
+    ax.set_ylim(0, 1.05)
+    ax.set_title(
+        f"{cust['customer_id']}\nx={cust['frequency']}, "
+        f"t_x={cust['recency']:.0f}, T={cust['T']:.0f}",
+        fontsize=9,
+    )
+    ax.set_xlabel("semanas futuras")
+axes[0, 0].set_ylabel("P(X = 0)")
+axes[1, 0].set_ylabel("P(X = 0)")
+axes[0, 0].legend(fontsize=7, loc="upper left")
+
+plt.suptitle("Probabilidad de cero transacciones en próximas $t$ semanas, por usuario",
+             fontsize=11)
+plt.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## 3. Modelo Gamma-Gamma
@@ -228,13 +409,25 @@ print(f"  % usuarios dentro del HDI 95%: "
 # Se ajusta sólo sobre `data_recurring` porque la fórmula requiere al menos una observación de gasto por usuario.
 
 # %%
-gg = clv.GammaGammaModel(data=data_recurring)
-gg.build_model()
+CACHE_GG = MODELS_DIR / f"gg_n{len(data_recurring)}.nc"
 
-print(f"Ajustando Gamma-Gamma sobre {len(data_recurring):,} usuarios recurrentes...")
-t0 = time.time()
-gg.fit(**MCMC_CONFIG)
-print(f"Fit completo en {(time.time()-t0)/60:.1f} minutos")
+if CACHE_GG.exists() and not FORCE_REFIT:
+    print(f"Cargando modelo Gamma-Gamma cacheado: {CACHE_GG.name}")
+    gg = clv.GammaGammaModel.load(CACHE_GG)
+else:
+    gg = clv.GammaGammaModel(data=data_recurring)
+    gg.build_model()
+
+    print(f"Ajustando Gamma-Gamma sobre {len(data_recurring):,} usuarios recurrentes...")
+    t0 = time.time()
+    gg.fit(**MCMC_CONFIG)
+    dt = (time.time() - t0) / 60
+    print(f"Fit completo en {dt:.1f} minutos. Guardando cache...")
+    gg.save(CACHE_GG)
+    print(f"✓ Modelo guardado en {CACHE_GG}")
+
+# %%
+print(gg)
 
 # %%
 VARS_GG = ["p", "q", "v"]
@@ -265,13 +458,46 @@ plt.show()
 # 3. $\mathbb{E}[\bar{z}_i]$ — gasto esperado por transacción (de Gamma-Gamma).
 
 # %%
-p_alive = bgnbd.expected_probability_alive(data=data_full)
+# Sampleo estratificado proporcional por (tipo_titulo, es_joven) → preserva
+# la mezcla del dataset completo, así que la segmentación sigue siendo válida.
+# Las posteriores poblacionales de (r, alpha, a, b) NO se ven afectadas;
+# esas siguen ajustadas sobre los 60k del modelo MCMC.
+
+N_ANALYSIS = 10000
+
+estrato = (rfm["tipo_titulo"].astype(str) + "_" + rfm["es_joven"].astype(str))
+data_analysis = (
+    rfm.assign(_estrato=estrato)
+       .groupby("_estrato", group_keys=False)
+       .apply(lambda d: d.sample(
+           n=max(1, int(round(N_ANALYSIS * len(d) / len(rfm)))),
+           random_state=SEED))
+       [["customer_id", "frequency", "recency", "T", "monetary_value"]]
+       .reset_index(drop=True)
+)
+data_recurring_analysis = data_analysis.query("frequency > 0").reset_index(drop=True)
+
+print(f"Muestra de análisis: {len(data_analysis):,} usuarios "
+      f"({100*len(data_analysis)/len(data_full):.1f}% del total)")
+print(f"  Recurrentes:        {len(data_recurring_analysis):,}")
+
+print("\nProporciones preservadas (population vs muestra):")
+ids_sample = set(data_analysis["customer_id"])
+rfm_sample = rfm[rfm["customer_id"].isin(ids_sample)]
+for col in ["tipo_titulo", "es_joven"]:
+    full_pct = rfm[col].value_counts(normalize=True).sort_index()
+    samp_pct = rfm_sample[col].value_counts(normalize=True).sort_index()
+    for k in full_pct.index:
+        print(f"  {col} = {str(k):20s}: full={full_pct[k]:.3f}   muestra={samp_pct[k]:.3f}")
+
+# %%
+p_alive = bgnbd.expected_probability_alive(data=data_analysis)
 
 p_alive_med = p_alive.median(dim=("chain", "draw")).to_pandas()
 p_alive_lo  = p_alive.quantile(0.025, dim=("chain", "draw")).to_pandas()
 p_alive_hi  = p_alive.quantile(0.975, dim=("chain", "draw")).to_pandas()
 
-print("Resumen de P(vivo) en la población:")
+print(f"P(vivo) calculado sobre muestra de {len(data_analysis):,} usuarios.\n")
 print(f"  Mediana poblacional: {p_alive_med.median():.3f}")
 print(f"  Ancho medio HDI 95%: {(p_alive_hi - p_alive_lo).mean():.3f}")
 print(f"  Usuarios 'muertos' (P_alive_med < 0.1):  {(p_alive_med < 0.1).sum():,}")
@@ -284,36 +510,32 @@ HORIZONTES_SEM  = {a: a * 52 for a in HORIZONTES_AÑOS}
 
 expected_purchases = {}
 for años, t_sem in HORIZONTES_SEM.items():
-    print(f"Calculando E[X(t={t_sem} sem.)]...")
+    print(f"Calculando E[X(t={t_sem} sem.)] sobre {len(data_analysis):,} usuarios...")
     expected_purchases[años] = bgnbd.expected_purchases(
-        data=data_full,
+        data=data_analysis,
         future_t=t_sem,
     )
 
-# Medianas para tener una idea
-print("\nMediana poblacional de transacciones esperadas:")
+print("\nMediana de transacciones esperadas (en la muestra):")
 for años, da in expected_purchases.items():
     med = da.median(dim=("chain", "draw")).median().item()
     print(f"  {años} año(s) ({años*52} semanas): {med:.1f} transacciones por usuario")
 
 # %%
-# Gasto esperado por transacción (de Gamma-Gamma)
-# Para usuarios SIN frequency > 0 se usa el gasto medio poblacional como fallback.
+# Gasto esperado por transacción del Gamma-Gamma — calculado sobre la muestra
+# de recurrentes. Lo guardamos como `expected_spend_recurring` y lo reutilizamos
+# en la celda de CLV (evitar recomputar es importante porque cada llamada es lenta).
 
-expected_spend_recurring = gg.expected_customer_spend(data=data_recurring)
-spend_med_population     = float(expected_spend_recurring.median())
+print(f"Calculando expected_customer_spend sobre {len(data_recurring_analysis):,} recurrentes...")
+expected_spend_recurring = gg.expected_customer_spend(data=data_recurring_analysis)
+spend_med_population = float(expected_spend_recurring.median())
 
-# Diccionario customer_id → mediana posterior del gasto esperado
 spend_med_recurring = (
     expected_spend_recurring.median(dim=("chain", "draw"))
-                              .to_pandas()
+                            .to_pandas()
 )
 
-# Para usuarios no recurrentes asignamos la mediana poblacional como prior
-spend_med_full = pd.Series(spend_med_population, index=data_full["customer_id"])
-spend_med_full.loc[data_recurring["customer_id"].values] = spend_med_recurring.values
-
-print(f"Gasto esperado por transacción (en \"viajes\" — multiplicar por precio):")
+print(f"\nGasto esperado por transacción (en \"viajes\" — multiplicar por precio):")
 print(f"  Mediana poblacional: {spend_med_population:.2f} viajes/transacción")
 print(f"  En euros (× {PRECIO_VIAJE} €/viaje): {spend_med_population * PRECIO_VIAJE:.2f} €/transacción")
 
@@ -329,17 +551,16 @@ print(f"  En euros (× {PRECIO_VIAJE} €/viaje): {spend_med_population * PRECIO
 # donde el primer factor es del BG/NBD y el segundo del Gamma-Gamma. Manejamos las distribuciones posteriores completas (no sólo medianas) para propagar la incertidumbre hasta el CLV final.
 
 # %%
-# 1) Gasto esperado por transacción — distribución posterior por usuario.
-spend_recurring_post = gg.expected_customer_spend(data=data_recurring)
+# 1) Reutilizamos `expected_spend_recurring` calculado en la celda anterior
+#    (evitar recomputar — es la llamada más cara).
+spend_pop_mean = float(expected_spend_recurring.mean())
+customer_ids_analysis = expected_purchases[1].customer_id.values
 
 # Para usuarios no recurrentes (frequency = 0) Gamma-Gamma no produce
 # predicción individual. Usamos la media poblacional posterior como fallback,
-# reindexando sobre el conjunto completo de customer_ids del BG/NBD.
-spend_pop_mean = float(spend_recurring_post.mean())
-customer_ids_full = expected_purchases[1].customer_id.values
-
-spend_post_full = spend_recurring_post.reindex(
-    customer_id=customer_ids_full,
+# reindexando sobre el conjunto de customer_ids de la muestra de análisis.
+spend_post_full = expected_spend_recurring.reindex(
+    customer_id=customer_ids_analysis,
     fill_value=spend_pop_mean,
 )
 
@@ -350,7 +571,7 @@ clv_posterior = {
 }
 
 # 3) Resumen poblacional con HDI 90 %
-print("CLV poblacional (€) — mediana del CLV mediano por usuario, con HDI 90 %:\n")
+print(f"CLV poblacional (€) — calculado sobre muestra de {len(data_analysis):,} usuarios:\n")
 filas = []
 for años, clv_da in clv_posterior.items():
     medianas = clv_da.median(dim=("chain", "draw"))     # mediana posterior por usuario
@@ -388,14 +609,18 @@ plt.show()
 # El objetivo específico (5) de la propuesta del TFM es comparar la dinámica de abandono y valor entre universitarios y residentes permanentes. Aquí lo materializamos con cortes del CLV por las tres variables categóricas del dataset: `tipo_titulo`, `cohort_year` y `es_joven`.
 
 # %%
-# Tabla con CLV mediano por usuario a cada horizonte, junto con las covariables
-clv_summary = rfm.set_index("customer_id").copy()
+# clv_summary contiene una fila por usuario de la MUESTRA con sus variables
+# originales (tipo_titulo, cohort_year, es_joven) + columnas de CLV.
+customer_ids = data_analysis["customer_id"].values
+
+clv_summary = rfm.set_index("customer_id").reindex(customer_ids).copy()
 for años, clv_da in clv_posterior.items():
-    clv_summary[f"clv_{años}y"] = clv_da.median(dim=("chain", "draw")).to_pandas().values
+    series = clv_da.median(dim=("chain", "draw")).to_pandas().reindex(customer_ids)
+    clv_summary[f"clv_{años}y"] = series.values
+clv_summary["p_alive_med"] = p_alive_med.reindex(customer_ids).values
 
-clv_summary["p_alive_med"] = p_alive_med.values
+print(f"CLV calculado para muestra de {len(clv_summary):,} usuarios\n")
 
-# CLV a 5 años por tipo de título
 print("CLV a 5 años por tipo de título:")
 print(clv_summary.groupby("tipo_titulo")["clv_5y"]
                   .agg(["median", "mean", "count"])
@@ -445,23 +670,14 @@ plt.show()
 
 # %%
 # P(vivo) vs CLV: los "vivos" valen más; los "muertos" tienen CLV bajo.
-fig, ax = plt.subplots(figsize=(8, 5))
+# Usamos constrained_layout porque la barra de color añade un eje que
+# no se lleva bien con plt.tight_layout().
+fig, ax = plt.subplots(figsize=(8, 5), constrained_layout=True)
 sc = ax.scatter(clv_summary["p_alive_med"], clv_summary["clv_5y"],
                  c=clv_summary["frequency"], cmap="viridis",
                  alpha=0.4, s=8)
 ax.set_xlabel("P(vivo) — mediana posterior")
 ax.set_ylabel("CLV a 5 años (€)")
 ax.set_title("Relación entre P(vivo) y CLV (color = frecuencia observada)")
-plt.colorbar(sc, label="frecuencia $x$")
-plt.tight_layout()
+fig.colorbar(sc, ax=ax, label="frecuencia $x$")
 plt.show()
-
-# %% [markdown]
-# ## 7. Conclusiones
-#
-# Este notebook materializa los objetivos centrales del TFM:
-#
-# 1. **BG/NBD ajustado con parameter recovery exitoso** — la posterior se concentra en torno a los $(r, \alpha, a, b)$ con los que se sembraron los datos.
-# 2. **Gamma-Gamma ajustado sobre usuarios recurrentes** — con la correlación frequency-monetary suficientemente baja para que el supuesto del modelo sea defendible.
-# 3. **CLV individual con HDI completo** a 1, 3 y 5 años — el resultado central del TFM.
-# 4. **Segmentación operativa** — diferencias de CLV entre tipos de título, cohortes y subpoblación joven, que se pueden traducir directamente a recomendaciones de política tarifaria.

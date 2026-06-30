@@ -67,10 +67,9 @@ print(f"  Factor COVID:                  {STATS['factor_covid']}")
 #
 
 # %%
-# La calibración por método de momentos vive en config.py como
-# calibrar_parametros_momentos(). El resultado por defecto está disponible
-# como PARAMS_CALIBRATED. Si cambian las estadísticas en config.STATS,
-# basta con re-llamar a la función para obtener los parámetros actualizados.
+# La calibración por método de momentos está implementada en
+# config.calibrar_parametros_momentos(). El resultado por defecto se
+# exporta como config.PARAMS_CALIBRATED.
 
 params = calibrar_parametros_momentos(STATS)
 

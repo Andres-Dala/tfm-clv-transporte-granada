@@ -64,9 +64,9 @@ STATS: dict[str, Any] = {
 
     # Distribución por tipo de título (porcentajes, 2023-2025)
     "pct_titulos": {
-        "tarjeta_consorcio": 0.58,
-        "monedero_metro":    0.23,
-        "bono_30_dias":      0.13,
+        "tarjeta_consorcio": 0.79,
+        "monedero_metro":    0.13,
+        "bono_30_dias":      0.02,
         "ocasional":         0.06,
     },
 
@@ -316,6 +316,30 @@ PLAUSIBILITY_RANGES: dict[str, tuple] = {
     "E_p":            (0.001, 0.1),    # prob. abandono semanal
     "monetary_value": (0.5, 20.0),     # viajes/semana activa
     "supervivencia_52sem": (0.5, 0.95),  # fracción viva tras 1 año
+}
+
+
+# ══════════════════════════════════════════════════════════════════
+# Tarifas por tipo de título (Enfoque A: multiplicador determinista)
+#
+# Dos regímenes de tarificación coexisten en el sistema CTAGR:
+#   - "por_viaje": pago por uso. El ingreso es proporcional al número de
+#                  validaciones: ingreso = validaciones x precio.
+#   - "mensual":   cuota fija (título cuasi-contractual). El ingreso NO
+#                  depende del número de validaciones, sino del tiempo que
+#                  el usuario mantiene activa la suscripción:
+#                  ingreso por semana activa = cuota_mensual / semanas_por_mes.
+#
+# Esta distinción es esencial: aplicar el precio mensual del bono como si
+# fuera un precio por viaje sobredimensionaría su CLV en un orden de magnitud.
+# ══════════════════════════════════════════════════════════════════
+SEMANAS_POR_MES = 52.0 / 12.0   # ≈ 4.333
+
+TARIFAS_POR_TITULO: dict[str, dict] = {
+    "tarjeta_consorcio": {"modo": "por_viaje", "precio": 0.49},  # €/validación
+    "monedero_metro":    {"modo": "por_viaje", "precio": 0.49},  # €/validación
+    "ocasional":         {"modo": "por_viaje", "precio": 1.35},  # €/validación
+    "bono_30_dias":      {"modo": "mensual",   "precio": 24.0},  # €/mes (cuota fija)
 }
 
 

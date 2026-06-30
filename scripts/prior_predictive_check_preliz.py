@@ -128,7 +128,7 @@ PRIORS_ELICITED = {
     for nombre, dist in elicitados.items()
 }
 
-print("\nPRIORS_ELICITED (formato pymc-marketing — copiar a config.PRIORS['elicited']):")
+print("\nPRIORS_ELICITED (formato pymc-marketing):")
 for k, v in PRIORS_ELICITED.items():
     print(f"  {k:6s}: {v}")
 
@@ -244,6 +244,7 @@ ax.set_title("Valor monetario $z$ simulado (viajes/sem. activa)")
 ax.legend(fontsize=9)
 
 plt.tight_layout()
+plt.savefig(r'C:\Users\andre\OneDrive\Documentos\UGR\tfm-clv-transporte-granada\docs\figures\prior_predictive.pdf')
 plt.show()
 
 # Cobertura cuantitativa

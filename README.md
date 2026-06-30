@@ -1,6 +1,4 @@
-# TFM: CLV en el Transporte Público de Granada mediante los modelos BG/NBD y Gamma-Gamma
-
-> Bayesian estimation of Client Lifetime Value (CLV) for public transport in Granada using the BG/NBD and Gamma-Gamma models with MCMC.
+# TFM: Valor de Vida del Usuario del Metropolitano en Granada: un enfoque bayesiano mediante los modelos BG/NBD y Gamma–Gamma con MCMC
 
 **Trabajo de Fin de Máster — Máster en Física y Matemáticas, Universidad de Granada (2025–2026)**
 
@@ -8,7 +6,7 @@
 
 ## Descripción
 
-Este repositorio contiene el código, datos sintéticos y análisis del TFM cuyo objetivo es calcular el **Valor de Vida del Cliente** (CLV) del sistema de transporte público del Área Metropolitana de Granada. Para ello se aplica el modelo probabilístico **BG/NBD** (*Beta-Geometric/Negative Binomial Distribution*), complementado con el modelo **Gamma-Gamma**, dentro de un marco de **inferencia bayesiana completa con MCMC**.
+Este repositorio contiene el código, datos sintéticos y análisis del TFM cuyo objetivo es calcular el **Valor de Vida del Cliente** (CLV) del Metro de Granada. Para ello se aplica el modelo probabilístico **BG/NBD** (*Beta-Geometric/Negative Binomial Distribution*), complementado con el modelo **Gamma-Gamma**, dentro de un marco de **inferencia bayesiana completa con MCMC**.
 
 El modelo, originalmente desarrollado para comercio electrónico, se reinterpreta formalmente en el dominio del transporte público: los usuarios validan su tarjeta de forma voluntaria y su abandono del sistema es silencioso e inobservable, lo que constituye un entorno no contractual y continuo matemáticamente equivalente.
 
@@ -34,22 +32,28 @@ Los datos individuales de validación de tarjetas no son públicos. Este proyect
 
 - [Metropolitano de Granada](https://www.metropolitanogranada.es) — Balances anuales 2017–2024
 - [CTAGR](https://ctagr.es) — Estadísticas del sistema multimodal
-- [Red de Consorcios de Andalucía](https://api.ctan.es) — Portal de datos abiertos GTFS
 
-El pipeline de generación estima los parámetros del modelo generativo mediante el **Método de Momentos** y los refina con ***Approximate Bayesian Computation*** (ABC).
+El pipeline de generación estima los parámetros del modelo generativo mediante el **Método de Momentos**.
 
 ---
 
 ## Dependencias principales
 
+> Generado con Python 3.13.7. Para reproducir exactamente los resultados,
+> se recomienda fijar estas versiones (ver `requirements.txt`).
+
 | Paquete | Versión | Uso |
 |---|---|---|
-| `pymc-marketing` | ≥ 0.7 | Modelos BG/NBD y Gamma-Gamma |
-| `pymc` | ≥ 5.0 | Muestreo MCMC con NUTS |
-| `arviz` | ≥ 0.17 | Diagnósticos y visualización |
-| `scipy` | ≥ 1.11 | Método de Momentos y ABC |
-| `pandas` | ≥ 2.0 | Manipulación de datos |
-| `numpy` | ≥ 1.25 | Cálculo numérico |
+| `pymc-marketing` | ≥ 0.19 | Modelos BG/NBD y Gamma-Gamma |
+| `pymc` | ≥ 5.28 | Modelo probabilístico subyacente |
+| `nutpie` | ≥ 0.16 | Muestreador NUTS (backend en Rust) |
+| `preliz` | ≥ 0.24 | Elicitación de priors por máxima entropía |
+| `arviz` | ≥ 0.23 | Diagnósticos de convergencia y visualización |
+| `scipy` | ≥ 1.17 | Método de los momentos y funciones especiales |
+| `pandas` | ≥ 3.0 | Manipulación de datos |
+| `numpy` | ≥ 2.4 | Cálculo numérico |
+| `matplotlib` | ≥ 3.10 | Generación de figuras |
+| `seaborn` | ≥ 0.13 | Gráficos estadísticos |
 
 ---
 
